@@ -1,0 +1,71 @@
+#!/bin/sh
+# Drop Wi-Fi for a fixed window, then restore it.
+#
+# Intended to be launched detached from an SSH session, since cutting Wi-Fi is
+# what kills that session. The risk being managed is stranding a headless
+# machine with no network, so restoration is attempted by two independent
+# paths: the main sequence below, and a failsafe process started BEFORE the
+# link is touched that re-enables Wi-Fi unconditionally later on, even if the
+# main sequence is killed.
+#
+#   nohup ~/.local/bin/wifi-drop-test en1 60 >/dev/null 2>&1 &
+#
+# Progress is written to /tmp/wifi-drop-test.log — readable once you are back in.
+
+set -u
+
+IFACE="${1:-en1}"
+DOWN="${2:-60}"
+LOG=/tmp/wifi-drop-test.log
+NS=/usr/sbin/networksetup
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
+
+: >"$LOG"
+log "wifi-drop-test: iface=$IFACE down=${DOWN}s pid=$$"
+
+# Failsafe first, so it exists before anything can go wrong. It re-enables the
+# link well after the intended window regardless of what happened to the main
+# sequence; turning Wi-Fi on when it is already on is a harmless no-op.
+nohup sh -c "sleep $((DOWN + 120)); $NS -setairportpower $IFACE on" >/dev/null 2>&1 &
+log "failsafe armed (pid $!, fires in $((DOWN + 120))s)"
+
+# Grace period so the invoking shell can return and you can disconnect cleanly.
+sleep 5
+
+if $NS -setairportpower "$IFACE" off; then
+	log "Wi-Fi OFF"
+else
+	log "ERROR: could not power off $IFACE — aborting, link untouched"
+	exit 1
+fi
+
+sleep "$DOWN"
+
+# Restore, retrying and verifying rather than assuming one call worked.
+i=1
+while [ "$i" -le 5 ]; do
+	$NS -setairportpower "$IFACE" on
+	sleep 4
+	if $NS -getairportpower "$IFACE" 2>/dev/null | grep -q ': On'; then
+		log "Wi-Fi ON (attempt $i)"
+		break
+	fi
+	log "power-on attempt $i did not take; retrying"
+	i=$((i + 1))
+done
+
+# Powered on is not the same as usable; wait for DHCP to hand back an address.
+i=1
+while [ "$i" -le 30 ]; do
+	ip=$(ipconfig getifaddr "$IFACE" 2>/dev/null || true)
+	if [ -n "${ip:-}" ]; then
+		log "link restored, IP $ip"
+		exit 0
+	fi
+	sleep 2
+	i=$((i + 1))
+done
+
+log "WARNING: Wi-Fi powered on but no IP after 60s — failsafe will retry"
+exit 1
