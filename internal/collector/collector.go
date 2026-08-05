@@ -32,6 +32,14 @@ type Collector struct {
 	ssid    string
 
 	openOutageID int64
+
+	// discover is the topology-discovery step, indirected so tests can drive
+	// the boot-time retry path without a real network. Defaults to Discover.
+	discover func(context.Context) error
+	// retryInitial and retryMax bound the discovery backoff. Fields rather than
+	// constants so tests do not have to sleep for real seconds.
+	retryInitial time.Duration
+	retryMax     time.Duration
 }
 
 // New builds a Collector against an already-open store.
@@ -40,14 +48,18 @@ func New(cfg config.Config, st *store.Store, lg *log.Logger) (*Collector, error)
 	if err != nil {
 		return nil, err
 	}
-	return &Collector{
-		cfg:       cfg,
-		st:        st,
-		prober:    p,
-		track:     classify.NewTracker(cfg.FailThreshold, cfg.ClearThreshold),
-		log:       lg,
-		targetIDs: make(map[string]int64),
-	}, nil
+	c := &Collector{
+		cfg:          cfg,
+		st:           st,
+		prober:       p,
+		track:        classify.NewTracker(cfg.FailThreshold, cfg.ClearThreshold),
+		log:          lg,
+		targetIDs:    make(map[string]int64),
+		retryInitial: 2 * time.Second,
+		retryMax:     30 * time.Second,
+	}
+	c.discover = c.Discover
+	return c, nil
 }
 
 // Close releases the ICMP socket.
@@ -201,11 +213,10 @@ func (c *Collector) reconcileCrash() {
 // reduces coverage rather than being recorded as downtime — we cannot claim the
 // link was down when we were not yet able to look.
 func (c *Collector) discoverWithRetry(ctx context.Context) error {
-	const maxBackoff = 30 * time.Second
-	backoff := 2 * time.Second
+	backoff := c.retryInitial
 
 	for attempt := 1; ; attempt++ {
-		err := c.Discover(ctx)
+		err := c.discover(ctx)
 		if err == nil {
 			if attempt > 1 {
 				c.log.Printf("network ready after %d attempts", attempt)
@@ -222,9 +233,9 @@ func (c *Collector) discoverWithRetry(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(backoff):
 		}
-		if backoff < maxBackoff {
-			if backoff *= 2; backoff > maxBackoff {
-				backoff = maxBackoff
+		if backoff < c.retryMax {
+			if backoff *= 2; backoff > c.retryMax {
+				backoff = c.retryMax
 			}
 		}
 	}
