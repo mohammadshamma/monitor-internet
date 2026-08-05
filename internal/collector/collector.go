@@ -188,10 +188,53 @@ func (c *Collector) reconcileCrash() {
 		id, class, time.Unix(lastTS, 0).Format(time.RFC3339))
 }
 
+// discoverWithRetry keeps trying topology discovery until it succeeds or ctx
+// ends.
+//
+// At boot the collector can start before the network is configured, and
+// `route -n get default` then reports no gateway. Treating that as fatal makes
+// the process exit, which under KeepAlive becomes a crash-loop against
+// launchd's restart throttle rather than a short wait. Waiting is both simpler
+// and more honest: there is genuinely nothing to measure until a route exists.
+//
+// The window before discovery succeeds is left as a gap in the heartbeat, so it
+// reduces coverage rather than being recorded as downtime — we cannot claim the
+// link was down when we were not yet able to look.
+func (c *Collector) discoverWithRetry(ctx context.Context) error {
+	const maxBackoff = 30 * time.Second
+	backoff := 2 * time.Second
+
+	for attempt := 1; ; attempt++ {
+		err := c.Discover(ctx)
+		if err == nil {
+			if attempt > 1 {
+				c.log.Printf("network ready after %d attempts", attempt)
+			}
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		c.log.Printf("waiting for the network (attempt %d): %v", attempt, err)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			if backoff *= 2; backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
 // Run drives the probe loop until ctx is cancelled.
 func (c *Collector) Run(ctx context.Context) error {
-	if err := c.Discover(ctx); err != nil {
-		return err
+	if err := c.discoverWithRetry(ctx); err != nil {
+		// The only error here is cancellation, which is a clean shutdown.
+		return nil
 	}
 	c.reconcileCrash()
 
