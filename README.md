@@ -243,6 +243,36 @@ and the real classifier, using TEST-NET-1 (`192.0.2.0/24`, guaranteed unroutable
 to simulate dead tiers without touching your network. The one that matters most is
 `TestDeadGatewayIsNeverBlamedOnTheProvider`.
 
+### Verifying attribution on your own machine
+
+The claim worth checking before you rely on any of this is that a fault in *your*
+equipment never lands on the provider's record. `scripts/wifi-drop-test` proves it
+end to end by actually cutting the link:
+
+```sh
+mon report --since 24h          # note ISP downtime and ISP outage count
+nohup scripts/wifi-drop-test en1 60 >/dev/null 2>&1 &
+# …wait for it to come back, then:
+mon report --since 24h          # those two numbers must be unchanged
+```
+
+A new `LAN_FAULT` outage should appear, LAN downtime should grow by roughly the
+window, and **ISP downtime and ISP outage count must not move at all**. Note that
+ISP *availability* may still rise slightly: it is a share of monitored time, so a
+constant downtime over a larger denominator gives a better percentage.
+
+> ⚠️ **This deliberately takes the machine off the network.** Run it detached
+> (`nohup … &`) — the link it cuts is very likely the one your SSH session is on.
+> Restoration runs on two independent paths: the main sequence retries and
+> verifies power came back and DHCP returned an address, and a failsafe armed
+> *before* the link is touched re-enables Wi-Fi unconditionally at
+> `window + 120s` even if the main sequence is killed. Progress is logged to
+> `/tmp/wifi-drop-test.log`.
+
+Measured on a Mac mini: a 60s Wi-Fi drop produced a 60s `LAN_FAULT` outage,
+backdated to the first failing cycle, with the provider's downtime and outage
+count byte-identical before and after.
+
 ## License
 
 MIT
