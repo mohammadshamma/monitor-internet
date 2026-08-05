@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Internet health</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="viz-root">
+
+<header class="topbar">
+  <div>
+    <h1>Internet health</h1>
+    <p class="sub" id="topology">—</p>
+  </div>
+  <div class="live" id="live">
+    <span class="pill" id="live-pill"><span class="pill-icon" id="live-icon"></span><span id="live-label">connecting…</span></span>
+    <span class="muted" id="live-time"></span>
+  </div>
+</header>
+
+<div class="filters" role="group" aria-label="Time range">
+  <button type="button" data-range="24h" class="range">24 hours</button>
+  <button type="button" data-range="7d" class="range is-selected" aria-pressed="true">7 days</button>
+  <button type="button" data-range="30d" class="range">30 days</button>
+  <button type="button" data-range="90d" class="range">90 days</button>
+</div>
+
+<main>
+
+  <!-- Hero: the single number this whole tool exists to produce. -->
+  <section class="card hero-card">
+    <p class="label">Provider availability<span class="muted"> · <span id="hero-window">7 days</span></span></p>
+    <p class="hero" id="hero">—</p>
+    <p class="hero-note" id="hero-note">
+      Uptime as a share of monitored time, counting only failures attributable to your provider.
+    </p>
+  </section>
+
+  <section class="tiles">
+    <div class="card tile">
+      <p class="label">Coverage</p>
+      <p class="value" id="t-coverage">—</p>
+      <p class="tile-note" id="t-coverage-note">How much of the window was actually monitored</p>
+    </div>
+    <div class="card tile">
+      <p class="label">Provider downtime</p>
+      <p class="value" id="t-isp">—</p>
+      <p class="tile-note" id="t-isp-note">ISP fault + upstream</p>
+    </div>
+    <div class="card tile">
+      <p class="label">Provider outages</p>
+      <p class="value" id="t-outages">—</p>
+      <p class="tile-note" id="t-outages-note">Distinct episodes</p>
+    </div>
+    <div class="card tile">
+      <p class="label">Longest outage</p>
+      <p class="value" id="t-longest">—</p>
+      <p class="tile-note" id="t-longest-note">Single worst episode</p>
+    </div>
+  </section>
+
+  <div id="warnings"></div>
+
+  <section class="card">
+    <h2>Timeline</h2>
+    <p class="sub">Each segment shows the worst state in that slice, so a brief outage is never averaged away.</p>
+
+    <!-- Legend is always present: status colour never carries meaning alone. -->
+    <div class="legend" id="legend"></div>
+
+    <div class="strip-wrap">
+      <svg id="strip" class="strip" role="img" aria-label="Connection state over time"></svg>
+      <div class="tooltip" id="strip-tip" hidden></div>
+    </div>
+    <div class="axis" id="strip-axis"></div>
+  </section>
+
+  <section class="card" id="latency-card">
+    <h2>Latency by target</h2>
+    <p class="sub">Round-trip time per probe target. Congestion usually shows up here as rising latency well before anything fails outright.</p>
+
+    <div class="legend" id="latency-legend"></div>
+
+    <div class="chart-wrap">
+      <svg id="latency" class="latency" role="img" aria-label="Round-trip time by probe target over time"></svg>
+      <div class="tooltip" id="latency-tip" hidden></div>
+    </div>
+    <div class="axis" id="latency-axis"></div>
+    <p class="empty" id="latency-note" hidden></p>
+
+    <div class="table-wrap">
+      <table id="target-table">
+        <thead>
+          <tr>
+            <th>Target</th><th>Tier</th><th>Best</th><th>Average</th>
+            <th>95th pct</th><th>Worst</th><th>Loss</th>
+          </tr>
+        </thead>
+        <tbody id="target-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="hours-card" hidden>
+    <h2>Provider downtime by hour of day</h2>
+    <p class="sub">Downtime concentrated in particular hours points at congestion rather than random faults.</p>
+    <div class="chart-wrap">
+      <svg id="hours" class="hours" role="img" aria-label="Provider downtime by hour of day"></svg>
+      <div class="tooltip" id="hours-tip" hidden></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Outages</h2>
+    <p class="sub">The table view — the authoritative record, and readable without relying on colour.</p>
+    <div class="table-wrap">
+      <table id="outages">
+        <thead>
+          <tr><th>Started</th><th>Duration</th><th>State</th><th>Blame</th></tr>
+        </thead>
+        <tbody id="outages-body"></tbody>
+      </table>
+    </div>
+    <p class="empty" id="outages-empty" hidden>No outages recorded in this window.</p>
+  </section>
+
+</main>
+
+<footer>
+  <p class="muted">
+    Read-only dashboard. Data from <code id="dbnote">monitor-internet</code>.
+    Availability figures describe monitored time only — always read them alongside coverage.
+  </p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+# Compiled binary
+/mon
+
+# Vendored dependencies are ~140 MB (modernc's transpiled libc and SQLite).
+# go.mod and go.sum pin exact versions, so builds stay reproducible without
+# them. Run `make vendor` locally if you want offline rebuilds.
+/vendor/
+
+# Local scratch
+*.db
+*.db-shm
+*.db-wal
+*.log
+.DS_Store

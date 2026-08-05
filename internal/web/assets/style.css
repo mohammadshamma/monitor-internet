@@ -1,0 +1,294 @@
+/* Dashboard styling.
+ *
+ * Colours come from the data-viz reference palette. Verdicts use the fixed
+ * STATUS palette (good/warning/serious/critical) rather than categorical
+ * slots, because they encode state, not identity.
+ *
+ * One known constraint, handled deliberately: status-warning (#fab219) and
+ * status-serious (#ec835a) measure ΔE 13.6 for normal vision, below the 15
+ * floor. Those two encode "degraded" and "your own LAN" — the pair whose
+ * distinction does not carry the conclusion, since the headline question is
+ * provider-versus-not, and critical red is well separated from both. The
+ * documented mitigation applies throughout: an always-present legend, an icon
+ * glyph per state, hover tooltips, and the outage table, so a status colour
+ * never carries meaning on its own.
+ */
+
+.viz-root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --plane: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --status-unknown: #c3c2b7;
+
+  /* Categorical slots 1–5, for the per-target latency series. These encode
+   * identity (which target), not state, so they come from the categorical
+   * palette rather than the status one. Validated as a 5-slot set in both
+   * modes: worst adjacent CVD ΔE 9.1 light / 8.4 dark, worst adjacent
+   * normal-vision ΔE 19.6 light / 19.3 dark. Three light-mode slots sit below
+   * 3:1 on the light surface, so the relief rule applies — hence the
+   * per-target stats table below the chart. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --status-unknown: #383835;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+  }
+}
+
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --plane: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --status-unknown: #383835;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 24px 48px;
+  background: var(--plane);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+main { max-width: 1080px; margin: 0 auto; }
+
+.topbar {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px 0 16px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+h1 { font-size: 20px; font-weight: 600; margin: 0; }
+h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+
+.sub, .tile-note, .hero-note { color: var(--text-secondary); margin: 0; font-size: 12.5px; }
+.muted { color: var(--text-muted); font-size: 12.5px; }
+.label {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  margin: 0 0 6px;
+  text-transform: none;
+}
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+/* Exactly one hero figure per view. Proportional figures at display size. */
+.hero {
+  font-size: 56px;
+  font-weight: 600;
+  line-height: 1.05;
+  margin: 2px 0 8px;
+  letter-spacing: -0.02em;
+}
+.hero-card { padding-bottom: 20px; }
+.hero-note { max-width: 62ch; }
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.tiles .card { margin-bottom: 0; }
+.tile .value { font-size: 26px; font-weight: 600; margin: 0 0 6px; }
+
+/* Filters sit in one row above the charts. */
+.filters {
+  max-width: 1080px;
+  margin: 0 auto 16px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.range {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+.range:hover { color: var(--text-primary); border-color: var(--baseline); }
+.range.is-selected {
+  color: var(--text-primary);
+  border-color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* Live indicator: colour plus glyph plus label, never colour alone. */
+.live { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 12px 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+.pill-icon {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--status-unknown);
+  flex: none;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 14px 0 12px;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.legend-swatch {
+  width: 11px; height: 11px;
+  border-radius: 3px;
+  flex: none;
+  border: 1px solid var(--border);
+}
+.legend-glyph { font-size: 11px; color: var(--text-muted); }
+
+.strip-wrap, .chart-wrap { position: relative; }
+.strip { width: 100%; height: 46px; display: block; }
+.hours { width: 100%; height: 190px; display: block; }
+.latency { width: 100%; height: 240px; display: block; }
+/* 2px lines with round joins, per the mark spec. */
+.latency .series-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+/* Dots carry a 2px ring in the surface colour so overlapping marks stay legible. */
+.latency .crosshair-dot { stroke: var(--surface-1); stroke-width: 2; }
+.latency .crosshair-line { stroke: var(--baseline); stroke-width: 1; }
+.tt-row { display: flex; align-items: center; gap: 7px; justify-content: space-between; }
+.tt-row .tt-name { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.tt-row .tt-val { font-variant-numeric: tabular-nums; }
+.tt-swatch { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+
+.axis {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 6px;
+}
+
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  border: 1px solid var(--baseline);
+  border-radius: 7px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
+  z-index: 5;
+  white-space: nowrap;
+}
+.tooltip .tt-head { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.tooltip .tt-sub { color: var(--text-secondary); }
+
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td {
+  text-align: left;
+  padding: 7px 12px 7px 0;
+  border-bottom: 1px solid var(--gridline);
+  white-space: nowrap;
+}
+th { color: var(--text-secondary); font-weight: 600; font-size: 12.5px; }
+td { font-variant-numeric: tabular-nums; }
+.state-cell { display: inline-flex; align-items: center; gap: 7px; }
+.state-dot { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+.blame-isp { font-weight: 600; }
+
+.warn {
+  background: var(--surface-1);
+  border: 1px solid var(--status-warning);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.warn strong { font-weight: 600; }
+
+.empty { color: var(--text-muted); font-size: 13px; margin: 4px 0 0; }
+
+footer { max-width: 1080px; margin: 24px auto 0; }
+code { font-size: 12px; color: var(--text-secondary); }
+
+/* Texture is the backup channel: opt in only where hue cannot be trusted. */
+@media (forced-colors: active) {
+  .legend-swatch, .state-dot, .pill-icon { forced-color-adjust: none; }
+}
+@media print {
+  body { background: #fff; }
+  .filters, .live { display: none; }
+}
