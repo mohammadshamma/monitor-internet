@@ -42,7 +42,7 @@ binary carries everything it needs.
 
 ### With `go install`
 
-Requires Go 1.24 or newer.
+Requires Go 1.26.9 or newer. With the default `GOTOOLCHAIN=auto`, an older installed Go fetches it automatically.
 
 ```sh
 go install github.com/mohammadshamma/monitor-internet/cmd/mon@latest
