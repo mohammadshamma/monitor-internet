@@ -133,41 +133,46 @@ func BuildSummary(st *store.Store, since, until time.Time, interval time.Duratio
 		observed += count
 		sec := count * secs
 		s.VerdictSeconds[verdict] = sec
-
-		v := classify.Verdict(verdict)
-		if v.BlamesISP() {
-			s.ISPDowntimeSeconds += sec
-		} else if v == classify.LANFault {
-			s.LANDowntimeSeconds += sec
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	rows.Close()
 
 	s.MonitoredSeconds = observed * secs
 	if s.WindowSeconds > 0 {
 		s.CoveragePct = pct(s.MonitoredSeconds, s.WindowSeconds)
 	}
-	if s.MonitoredSeconds > 0 {
-		s.ISPAvailabilityPct = pct(s.MonitoredSeconds-s.ISPDowntimeSeconds, s.MonitoredSeconds)
-		s.TotalAvailabilityPct = pct(
-			s.MonitoredSeconds-s.ISPDowntimeSeconds-s.LANDowntimeSeconds, s.MonitoredSeconds)
-	}
 
-	outages, err := Outages(st, since, until)
+	outages, spans, err := loadOutages(st, since, until, secs)
 	if err != nil {
 		return nil, err
 	}
 	s.OutageCount = len(outages)
-	for _, o := range outages {
+	for i, o := range outages {
 		if o.BlamesISP {
 			s.ISPOutageCount++
+			s.ISPDowntimeSeconds += spans[i].winDur
+		} else if classify.Verdict(o.Class) == classify.LANFault {
+			s.LANDowntimeSeconds += spans[i].winDur
 		}
 		if o.Duration > s.LongestOutageSeconds {
 			s.LongestOutageSeconds = o.Duration
 			s.LongestOutageClass = o.Class
 		}
+	}
+
+	if s.MonitoredSeconds > 0 {
+		ispUp := s.MonitoredSeconds - s.ISPDowntimeSeconds
+		if ispUp < 0 {
+			ispUp = 0
+		}
+		totalUp := s.MonitoredSeconds - s.ISPDowntimeSeconds - s.LANDowntimeSeconds
+		if totalUp < 0 {
+			totalUp = 0
+		}
+		s.ISPAvailabilityPct = pct(ispUp, s.MonitoredSeconds)
+		s.TotalAvailabilityPct = pct(totalUp, s.MonitoredSeconds)
 	}
 	// Mean time between provider failures, over monitored time only.
 	if s.ISPOutageCount > 0 {
@@ -177,36 +182,139 @@ func BuildSummary(st *store.Store, since, until time.Time, interval time.Duratio
 	return s, nil
 }
 
+type outageSpan struct {
+	clampedStart int64
+	winDur       int64
+	blamesISP    bool
+}
+
 // Outages lists outage sessions overlapping the window, newest first.
 func Outages(st *store.Store, since, until time.Time) ([]Outage, error) {
+	out, _, err := loadOutages(st, since, until, 5)
+	return out, err
+}
+
+func loadOutages(st *store.Store, since, until time.Time, secs int64) ([]Outage, []outageSpan, error) {
+	if secs <= 0 {
+		secs = 5
+	}
 	rows, err := st.DB().Query(`
 		SELECT id, started, COALESCE(ended, 0), COALESCE(duration_s, 0), class, COALESCE(detail, '')
 		FROM outages
 		WHERE started <= ? AND (ended IS NULL OR ended >= ?)
 		ORDER BY started DESC`, until.Unix(), since.Unix())
 	if err != nil {
-		return nil, fmt.Errorf("query outages: %w", err)
+		return nil, nil, fmt.Errorf("query outages: %w", err)
 	}
-	defer rows.Close()
+
+	type rawOutage struct {
+		id      int64
+		started int64
+		ended   int64
+		dur     int64
+		class   string
+		detail  string
+	}
+	var raws []rawOutage
+	for rows.Next() {
+		var r rawOutage
+		if err := rows.Scan(&r.id, &r.started, &r.ended, &r.dur, &r.class, &r.detail); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		raws = append(raws, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, err
+	}
+	rows.Close()
 
 	var out []Outage
-	for rows.Next() {
-		var o Outage
-		var started, ended int64
-		if err := rows.Scan(&o.ID, &started, &ended, &o.Duration, &o.Class, &o.Detail); err != nil {
-			return nil, err
+	var spans []outageSpan
+	sinceUnix := since.Unix()
+	untilUnix := until.Unix()
+
+	for _, r := range raws {
+		o := Outage{
+			ID:        r.id,
+			Started:   time.Unix(r.started, 0),
+			Duration:  r.dur,
+			Class:     r.class,
+			BlamesISP: classify.Verdict(r.class).BlamesISP(),
+			Detail:    r.detail,
 		}
-		o.Started = time.Unix(started, 0)
-		if ended == 0 {
+
+		var lastBad int64
+		if r.ended == 0 {
 			o.Ongoing = true
-			o.Duration = int64(time.Since(o.Started).Seconds())
+			lastBad, o.Duration = ongoingOutageBounds(st, r.started, untilUnix, secs)
 		} else {
-			o.Ended = time.Unix(ended, 0)
+			o.Ended = time.Unix(r.ended, 0)
+			lastBad = r.ended
+			if o.Duration <= r.ended-r.started {
+				diff := r.ended - r.started
+				if diff < 0 {
+					diff = 0
+				}
+				o.Duration = diff + secs
+			}
 		}
-		o.BlamesISP = classify.Verdict(o.Class).BlamesISP()
+
+		clampedStart := r.started
+		if sinceUnix > clampedStart {
+			clampedStart = r.started + ((sinceUnix-r.started+secs-1)/secs)*secs
+		}
+		clampedEnd := lastBad
+		if untilUnix < clampedEnd {
+			if untilUnix < r.started {
+				clampedEnd = r.started - secs
+			} else {
+				clampedEnd = r.started + ((untilUnix-r.started)/secs)*secs
+			}
+		}
+		var winDur int64
+		if clampedEnd >= clampedStart {
+			if !o.Ongoing && r.started >= sinceUnix && r.ended <= untilUnix {
+				winDur = o.Duration
+			} else {
+				winDur = (clampedEnd - clampedStart) + secs
+			}
+		}
+
 		out = append(out, o)
+		spans = append(spans, outageSpan{
+			clampedStart: clampedStart,
+			winDur:       winDur,
+			blamesISP:    o.BlamesISP,
+		})
 	}
-	return out, rows.Err()
+	return out, spans, nil
+}
+
+func ongoingOutageBounds(st *store.Store, started, untilUnix, secs int64) (lastBad, duration int64) {
+	var maxBad int64
+	_ = st.DB().QueryRow(`
+		SELECT COALESCE(MAX(ts), 0) FROM cycles
+		WHERE ts >= ? AND ts <= ? AND verdict IN ('LAN_FAULT', 'ISP_FAULT', 'ISP_UPSTREAM')`,
+		started, untilUnix).Scan(&maxBad)
+	if maxBad >= started {
+		return maxBad, (maxBad - started) + secs
+	}
+	var totalCycles int64
+	_ = st.DB().QueryRow(`SELECT COUNT(*) FROM cycles`).Scan(&totalCycles)
+	if totalCycles > 0 {
+		return started, secs
+	}
+	endUnix := untilUnix
+	if now := time.Now().Unix(); now < endUnix && now >= started {
+		endUnix = now
+	}
+	dur := endUnix - started
+	if dur < secs {
+		dur = secs
+	}
+	return started + dur - secs, dur
 }
 
 // CurrentStatus reports the most recent cycle and whether it is stale.
@@ -324,27 +432,28 @@ func HourHistogram(st *store.Store, since, until time.Time, interval time.Durati
 		secs = 5
 	}
 
-	rows, err := st.DB().Query(`
-		SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER), verdict, COUNT(*)
-		FROM cycles WHERE ts >= ? AND ts <= ?
-		GROUP BY 1, 2`, since.Unix(), until.Unix())
+	_, spans, err := loadOutages(st, since, until, secs)
 	if err != nil {
 		return hist, err
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var hour int
-		var verdict string
-		var count int64
-		if err := rows.Scan(&hour, &verdict, &count); err != nil {
-			return hist, err
+	for _, sp := range spans {
+		if !sp.blamesISP || sp.winDur <= 0 {
+			continue
 		}
-		if hour >= 0 && hour < 24 && classify.Verdict(verdict).BlamesISP() {
-			hist[hour] += count * secs
+		cur := time.Unix(sp.clampedStart, 0).In(time.Local)
+		end := time.Unix(sp.clampedStart+sp.winDur, 0).In(time.Local)
+		for cur.Before(end) {
+			intoHour := time.Duration(cur.Minute())*time.Minute + time.Duration(cur.Second())*time.Second
+			nextHour := cur.Add(time.Hour - intoHour)
+			if nextHour.After(end) {
+				nextHour = end
+			}
+			hist[cur.Hour()] += int64(nextHour.Sub(cur).Seconds())
+			cur = nextHour
 		}
 	}
-	return hist, rows.Err()
+	return hist, nil
 }
 
 // Links lists the interface/SSID combinations seen in the window.

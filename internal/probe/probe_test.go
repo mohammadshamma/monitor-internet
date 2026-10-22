@@ -70,3 +70,22 @@ func TestProbeConcurrentTargets(t *testing.T) {
 		}
 	}
 }
+
+// TestProbeDeadlineCoversAllSendRounds verifies that when (count-1)*100ms >= timeout,
+// the reader deadline does not expire before the final echo round is sent and answered.
+func TestProbeDeadlineCoversAllSendRounds(t *testing.T) {
+	p, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer p.Close()
+
+	// 3 echoes are spaced by 2 * 100ms = 200ms. With timeout = 150ms, computing
+	// deadline before the send loop expires the reader at 150ms before the 3rd
+	// echo is sent at 200ms.
+	res := p.Probe(context.Background(), []string{"127.0.0.1"}, 3, 150*time.Millisecond)
+	got := res["127.0.0.1"]
+	if got.Sent != 3 || got.Recv != 3 {
+		t.Errorf("127.0.0.1 sent=%d recv=%d, want sent=3 recv=3", got.Sent, got.Recv)
+	}
+}
