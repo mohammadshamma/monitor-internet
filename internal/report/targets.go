@@ -111,10 +111,16 @@ func TargetsSeries(st *store.Store, since, until time.Time, buckets int, interva
 		strideClause = fmt.Sprintf(" AND (ts %% %d) < %d", stride, int64(interval.Seconds()))
 	}
 
-	widthSec := int64(span.Seconds()) / int64(buckets)
-	if widthSec < 1 {
+	spanSec := int64(math.Ceil(span.Seconds()))
+	var widthSec int64
+	if spanSec <= int64(buckets) {
 		widthSec = 1
-		buckets = int(span.Seconds())
+		buckets = int(spanSec)
+		if buckets < 1 {
+			buckets = 1
+		}
+	} else {
+		widthSec = (spanSec + int64(buckets) - 1) / int64(buckets)
 	}
 
 	out := make([]TargetSeries, 0, len(targets))
@@ -129,12 +135,12 @@ func TargetsSeries(st *store.Store, since, until time.Time, buckets int, interva
 		}
 
 		q := fmt.Sprintf(`
-			SELECT (ts - ?) / ?, AVG(rtt_us), MAX(rtt_us), AVG(loss_pct), COUNT(*)
+			SELECT MIN((ts - ?) / ?, ?), AVG(rtt_us), MAX(rtt_us), AVG(loss_pct), COUNT(*)
 			FROM samples
 			WHERE target_id = ? AND ts >= ? AND ts <= ?%s
 			GROUP BY 1`, strideClause)
 
-		bRows, err := st.DB().Query(q, since.Unix(), widthSec, t.id, since.Unix(), until.Unix())
+		bRows, err := st.DB().Query(q, since.Unix(), widthSec, buckets-1, t.id, since.Unix(), until.Unix())
 		if err != nil {
 			return nil, fmt.Errorf("query samples for %s: %w", t.name, err)
 		}

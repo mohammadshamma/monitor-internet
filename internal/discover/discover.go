@@ -97,6 +97,8 @@ func Trace(ctx context.Context, target string, maxHops int) ([]Hop, error) {
 	return hops, nil
 }
 
+var traceHops = Trace
+
 // FirstISPHop returns the first hop past the gateway that is not a private
 // address — the edge of the provider's network, and the point that separates
 // "my house" from "their line".
@@ -104,20 +106,34 @@ func Trace(ctx context.Context, target string, maxHops int) ([]Hop, error) {
 // It returns candidates in path order so a caller can fall back to a later hop
 // when the first one refuses to answer ICMP.
 func FirstISPHop(ctx context.Context, gateway, target string) ([]string, error) {
-	hops, err := Trace(ctx, target, 6)
+	hops, err := traceHops(ctx, target, 6)
 	if err != nil {
 		return nil, err
 	}
+	return filterISPHops(hops, gateway, target)
+}
+
+func filterISPHops(hops []Hop, gateway, target string) ([]string, error) {
+	gwIP := net.ParseIP(gateway)
+	targetIP := net.ParseIP(target)
 
 	var candidates []string
+	seen := make(map[string]bool)
 	for _, h := range hops {
-		if h.Addr == gateway {
+		if h.Addr == gateway || h.Addr == target {
 			continue
 		}
 		ip := net.ParseIP(h.Addr)
 		if ip == nil || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 			continue
 		}
+		if (gwIP != nil && ip.Equal(gwIP)) || (targetIP != nil && ip.Equal(targetIP)) {
+			continue
+		}
+		if seen[h.Addr] {
+			continue
+		}
+		seen[h.Addr] = true
 		candidates = append(candidates, h.Addr)
 	}
 	if len(candidates) == 0 {

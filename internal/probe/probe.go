@@ -81,6 +81,9 @@ func (p *Prober) Probe(ctx context.Context, addrs []string, count int, timeout t
 	for _, a := range addrs {
 		results[a] = Result{Addr: a}
 	}
+	if count <= 0 || len(addrs) == 0 {
+		return results
+	}
 
 	type pending struct {
 		addr string
@@ -89,10 +92,16 @@ func (p *Prober) Probe(ctx context.Context, addrs []string, count int, timeout t
 	inflight := make(map[int]pending)
 	var mu sync.Mutex
 
-	deadline := time.Now().Add(timeout)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-		deadline = dl
+	clampDeadline := func(d time.Time) time.Time {
+		if dl, ok := ctx.Deadline(); ok && dl.Before(d) {
+			return dl
+		}
+		return d
 	}
+
+	sendSpan := time.Duration(count-1) * 100 * time.Millisecond
+	deadline := clampDeadline(time.Now().Add(sendSpan + timeout + time.Second))
+	_ = p.conn.SetReadDeadline(deadline)
 
 	// Reader runs for the whole window, collecting whatever arrives.
 	done := make(chan struct{})
@@ -100,7 +109,10 @@ func (p *Prober) Probe(ctx context.Context, addrs []string, count int, timeout t
 		defer close(done)
 		buf := make([]byte, 1500)
 		for {
-			if err := p.conn.SetReadDeadline(deadline); err != nil {
+			mu.Lock()
+			dl := deadline
+			mu.Unlock()
+			if err := p.conn.SetReadDeadline(dl); err != nil {
 				return
 			}
 			n, peer, err := p.conn.ReadFrom(buf)
@@ -135,7 +147,11 @@ func (p *Prober) Probe(ctx context.Context, addrs []string, count int, timeout t
 
 	// Send every echo. Interleaved by round so a slow target does not delay the
 	// others' first probe.
+sendLoop:
 	for i := 0; i < count; i++ {
+		if ctx.Err() != nil {
+			break
+		}
 		for _, addr := range addrs {
 			ip := net.ParseIP(addr)
 			if ip == nil {
@@ -173,9 +189,21 @@ func (p *Prober) Probe(ctx context.Context, addrs []string, count int, timeout t
 			select {
 			case <-time.After(100 * time.Millisecond):
 			case <-ctx.Done():
+				break sendLoop
 			}
 		}
 	}
+
+	// Arm the final read deadline now that the last round has been sent.
+	mu.Lock()
+	if ctx.Err() != nil {
+		deadline = time.Now()
+	} else {
+		deadline = clampDeadline(time.Now().Add(timeout))
+	}
+	dl := deadline
+	mu.Unlock()
+	_ = p.conn.SetReadDeadline(dl)
 
 	<-done
 

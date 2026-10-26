@@ -186,11 +186,36 @@ func (s *Store) OpenOutage(started time.Time, class, detail string) (int64, erro
 // The class is rewritten on close because a session can escalate: an outage
 // that first looks like local trouble but later proves to be the provider must
 // end up recorded against the provider.
-func (s *Store) CloseOutage(id int64, ended time.Time, class string) error {
+//
+// Both started and ended are cycle timestamps (the first and last failing
+// cycles), so the outage spans (ended - started) + interval.
+func (s *Store) CloseOutage(id int64, ended time.Time, class string, interval ...time.Duration) error {
+	step := s.outageStep(id, ended.Unix(), interval...)
 	_, err := s.db.Exec(
-		`UPDATE outages SET ended = ?, duration_s = ? - started, class = ? WHERE id = ?`,
-		ended.Unix(), ended.Unix(), class, id)
+		`UPDATE outages SET ended = ?, duration_s = MAX(0, ? - started) + ?, class = ? WHERE id = ?`,
+		ended.Unix(), ended.Unix(), step, class, id)
 	return err
+}
+
+func (s *Store) outageStep(id, endedUnix int64, interval ...time.Duration) int64 {
+	if len(interval) > 0 {
+		if secs := int64(interval[0].Seconds()); secs > 0 {
+			return secs
+		}
+	}
+	var started int64
+	if err := s.db.QueryRow(`SELECT started FROM outages WHERE id = ?`, id).Scan(&started); err == nil {
+		var minTS, maxTS, count int64
+		if err := s.db.QueryRow(
+			`SELECT COALESCE(MIN(ts), 0), COALESCE(MAX(ts), 0), COUNT(*) FROM cycles WHERE ts >= ? AND ts <= ?`,
+			started, endedUnix,
+		).Scan(&minTS, &maxTS, &count); err == nil && count >= 2 && maxTS > minTS {
+			if step := (maxTS - minTS) / (count - 1); step > 0 {
+				return step
+			}
+		}
+	}
+	return 5
 }
 
 // UnfinishedOutage returns the id and start of an outage left open by a crash,

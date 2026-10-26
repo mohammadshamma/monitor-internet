@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/mohammadshamma/monitor-internet/internal/classify"
 	"github.com/mohammadshamma/monitor-internet/internal/config"
+	"github.com/mohammadshamma/monitor-internet/internal/discover"
 	"github.com/mohammadshamma/monitor-internet/internal/report"
 	"github.com/mohammadshamma/monitor-internet/internal/store"
 )
@@ -194,5 +196,117 @@ func TestSingleBadCycleCreatesNoOutageEndToEnd(t *testing.T) {
 	}
 	if len(outages) != 0 {
 		t.Errorf("got %d outages from a single bad cycle; debounce failed", len(outages))
+	}
+	s, err := report.BuildSummary(st, until.Add(-time.Hour), until, config.Default().Interval)
+	if err != nil {
+		t.Fatalf("BuildSummary: %v", err)
+	}
+	if s.ISPDowntimeSeconds != 0 {
+		t.Errorf("ISP downtime = %ds from a single debounced cycle, want 0", s.ISPDowntimeSeconds)
+	}
+}
+
+func TestPinnedGatewayDoesNotTriggerFalseLinkChangeRediscovery(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Gateway = "192.168.1.1" // outer router pinned in double-NAT
+	cfg.ISPEdge = "203.0.113.1"
+
+	c, err := New(cfg, st, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("new collector: %v", err)
+	}
+	defer c.Close()
+
+	var discoverCalls int
+	c.defaultRoute = func(context.Context) (discover.Route, error) {
+		return discover.Route{Gateway: "192.168.2.1", Interface: "en0"}, nil
+	}
+	c.lookupSSID = func(context.Context, string) string { return "HomeWiFi" }
+	c.discover = func(ctx context.Context) error {
+		discoverCalls++
+		return c.Discover(ctx)
+	}
+
+	ctx := context.Background()
+	if err := c.Discover(ctx); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if c.gateway != "192.168.1.1" {
+		t.Fatalf("c.gateway = %q, want 192.168.1.1", c.gateway)
+	}
+
+	// Subsequent refreshLink ticks see the same OS default route (192.168.2.1)
+	// and must not mistake the pinned gateway override for a link change.
+	c.refreshLink(ctx)
+	c.refreshLink(ctx)
+	if discoverCalls != 0 {
+		t.Errorf("refreshLink triggered %d rediscoveries when gateway was pinned, want 0", discoverCalls)
+	}
+}
+
+func TestDiscoverClearsStaleISPEdgeWhenFirstISPHopFails(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	c, err := New(cfg, st, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("new collector: %v", err)
+	}
+	defer c.Close()
+
+	c.defaultRoute = func(context.Context) (discover.Route, error) {
+		return discover.Route{Gateway: "192.168.1.1", Interface: "en0"}, nil
+	}
+	c.lookupSSID = func(context.Context, string) string { return "HomeWiFi" }
+	c.ispEdge = "203.0.113.9"
+	c.firstISPHop = func(context.Context, string, string) ([]string, error) {
+		return nil, errors.New("no public hop found")
+	}
+
+	if err := c.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if c.ispEdge != "" {
+		t.Errorf("c.ispEdge = %q, want empty after FirstISPHop failure", c.ispEdge)
+	}
+	if got := st.GetMeta("isp_edge"); got != "" {
+		t.Errorf("meta isp_edge = %q, want empty", got)
+	}
+}
+
+func TestPickResponsiveHopNeverSelectsTraceTargetOrAnchor(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	cfg := config.Default()
+	cfg.Timeout = 100 * time.Millisecond
+	c, err := New(cfg, st, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("new collector: %v", err)
+	}
+	defer c.Close()
+
+	// If an intermediate ISP hop drops ICMP and 1.1.1.1 (TraceTarget/anchor) is
+	// in candidates, pickResponsiveHop must not collapse tier separation by
+	// picking 1.1.1.1 as isp_edge.
+	got := c.pickResponsiveHop(context.Background(), []string{unreachableA, "1.1.1.1"})
+	if got != unreachableA {
+		t.Errorf("pickResponsiveHop = %q, want %q (must exclude TraceTarget 1.1.1.1)", got, unreachableA)
+	}
+	if onlyTarget := c.pickResponsiveHop(context.Background(), []string{"1.1.1.1"}); onlyTarget != "" {
+		t.Errorf("pickResponsiveHop([1.1.1.1]) = %q, want empty", onlyTarget)
 	}
 }

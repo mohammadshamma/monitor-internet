@@ -35,7 +35,10 @@ type Collector struct {
 
 	// discover is the topology-discovery step, indirected so tests can drive
 	// the boot-time retry path without a real network. Defaults to Discover.
-	discover func(context.Context) error
+	discover     func(context.Context) error
+	defaultRoute func(context.Context) (discover.Route, error)
+	lookupSSID   func(context.Context, string) string
+	firstISPHop  func(context.Context, string, string) ([]string, error)
 	// retryInitial and retryMax bound the discovery backoff. Fields rather than
 	// constants so tests do not have to sleep for real seconds.
 	retryInitial time.Duration
@@ -55,6 +58,9 @@ func New(cfg config.Config, st *store.Store, lg *log.Logger) (*Collector, error)
 		track:        classify.NewTracker(cfg.FailThreshold, cfg.ClearThreshold),
 		log:          lg,
 		targetIDs:    make(map[string]int64),
+		defaultRoute: discover.DefaultRoute,
+		lookupSSID:   discover.SSID,
+		firstISPHop:  discover.FirstISPHop,
 		retryInitial: 2 * time.Second,
 		retryMax:     30 * time.Second,
 	}
@@ -103,12 +109,25 @@ func (c *Collector) Cycle(ctx context.Context) { c.cycle(ctx) }
 
 // Discover works out the topology and registers the resulting targets.
 func (c *Collector) Discover(ctx context.Context) error {
-	route, err := discover.DefaultRoute(ctx)
+	routeFn := c.defaultRoute
+	if routeFn == nil {
+		routeFn = discover.DefaultRoute
+	}
+	ssidFn := c.lookupSSID
+	if ssidFn == nil {
+		ssidFn = discover.SSID
+	}
+	hopFn := c.firstISPHop
+	if hopFn == nil {
+		hopFn = discover.FirstISPHop
+	}
+
+	route, err := routeFn(ctx)
 	if err != nil {
 		return fmt.Errorf("discover default route: %w", err)
 	}
 	c.iface = route.Interface
-	c.ssid = discover.SSID(ctx, route.Interface)
+	c.ssid = ssidFn(ctx, route.Interface)
 
 	// A configured gateway or ISP edge pins the topology by hand, for networks
 	// where discovery cannot work (double NAT, a router that never answers).
@@ -118,12 +137,13 @@ func (c *Collector) Discover(ctx context.Context) error {
 		c.log.Printf("gateway pinned by config: %s", c.gateway)
 	}
 
+	c.ispEdge = ""
 	switch {
 	case c.cfg.ISPEdge != "":
 		c.ispEdge = c.cfg.ISPEdge
 		c.log.Printf("ISP edge pinned by config: %s", c.ispEdge)
 	default:
-		candidates, err := discover.FirstISPHop(ctx, c.gateway, c.cfg.TraceTarget)
+		candidates, err := hopFn(ctx, c.gateway, c.cfg.TraceTarget)
 		if err != nil {
 			// Losing the ISP edge target degrades attribution detail but must
 			// not stop collection — gateway and internet tiers still separate
@@ -141,7 +161,14 @@ func (c *Collector) Discover(ctx context.Context) error {
 // ISP routers often de-prioritise or drop pings aimed at their own interface;
 // picking a silent hop would fill the record with meaningless failures.
 func (c *Collector) pickResponsiveHop(ctx context.Context, candidates []string) string {
+	filtered := make([]string, 0, len(candidates))
 	for _, addr := range candidates {
+		if c.isExcludedISPEdge(addr) {
+			continue
+		}
+		filtered = append(filtered, addr)
+	}
+	for _, addr := range filtered {
 		res := c.prober.Probe(ctx, []string{addr}, 3, c.cfg.Timeout)
 		if r := res[addr]; r.OK() {
 			c.log.Printf("ISP edge target: %s (rtt %v, loss %.0f%%)", addr, r.RTT, r.LossPct())
@@ -149,11 +176,23 @@ func (c *Collector) pickResponsiveHop(ctx context.Context, candidates []string) 
 		}
 		c.log.Printf("hop %s does not answer ICMP; trying next", addr)
 	}
-	if len(candidates) > 0 {
-		c.log.Printf("warn: no ISP hop answered ICMP; using %s as a corroborating signal only", candidates[0])
-		return candidates[0]
+	if len(filtered) > 0 {
+		c.log.Printf("warn: no ISP hop answered ICMP; using %s as a corroborating signal only", filtered[0])
+		return filtered[0]
 	}
 	return ""
+}
+
+func (c *Collector) isExcludedISPEdge(addr string) bool {
+	if addr == "" || addr == c.gateway || addr == c.cfg.TraceTarget {
+		return true
+	}
+	for _, a := range c.cfg.Anchors {
+		if addr == a.Addr {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Collector) registerTargets() error {
@@ -189,10 +228,10 @@ func (c *Collector) reconcileCrash() {
 		return
 	}
 	var lastTS int64
-	if err := c.st.DB().QueryRow(`SELECT COALESCE(MAX(ts), 0) FROM cycles`).Scan(&lastTS); err != nil || lastTS == 0 {
+	if err := c.st.DB().QueryRow(`SELECT COALESCE(MAX(ts), 0) FROM cycles`).Scan(&lastTS); err != nil || lastTS < started.Unix() {
 		lastTS = started.Unix()
 	}
-	if err := c.st.CloseOutage(id, time.Unix(lastTS, 0), class); err != nil {
+	if err := c.st.CloseOutage(id, time.Unix(lastTS, 0), class, c.cfg.Interval); err != nil {
 		c.log.Printf("warn: could not close crashed outage %d: %v", id, err)
 		return
 	}
@@ -281,15 +320,32 @@ func (c *Collector) Run(ctx context.Context) error {
 }
 
 func (c *Collector) refreshLink(ctx context.Context) {
-	route, err := discover.DefaultRoute(ctx)
+	routeFn := c.defaultRoute
+	if routeFn == nil {
+		routeFn = discover.DefaultRoute
+	}
+	ssidFn := c.lookupSSID
+	if ssidFn == nil {
+		ssidFn = discover.SSID
+	}
+	discoverFn := c.discover
+	if discoverFn == nil {
+		discoverFn = c.Discover
+	}
+
+	route, err := routeFn(ctx)
 	if err != nil {
 		return
 	}
-	ssid := discover.SSID(ctx, route.Interface)
-	if route.Interface != c.iface || ssid != c.ssid || route.Gateway != c.gateway {
+	ssid := ssidFn(ctx, route.Interface)
+	gateway := route.Gateway
+	if c.cfg.Gateway != "" {
+		gateway = c.cfg.Gateway
+	}
+	if route.Interface != c.iface || ssid != c.ssid || gateway != c.gateway {
 		c.log.Printf("link changed: iface %s->%s gateway %s->%s ssid %q->%q; rediscovering",
-			c.iface, route.Interface, c.gateway, route.Gateway, c.ssid, ssid)
-		if err := c.Discover(ctx); err != nil {
+			c.iface, route.Interface, c.gateway, gateway, c.ssid, ssid)
+		if err := discoverFn(ctx); err != nil {
 			c.log.Printf("warn: rediscovery failed: %v", err)
 		}
 	}
@@ -372,12 +428,12 @@ func (c *Collector) handleEvent(ev *classify.Event) {
 		if c.openOutageID == 0 {
 			return
 		}
-		if err := c.st.CloseOutage(c.openOutageID, ev.End, string(ev.Class)); err != nil {
+		if err := c.st.CloseOutage(c.openOutageID, ev.End, string(ev.Class), c.cfg.Interval); err != nil {
 			c.log.Printf("warn: close outage: %v", err)
 			return
 		}
 		c.log.Printf("OUTAGE END   %s lasted %v (ended %s)",
-			ev.Class, ev.End.Sub(ev.Start), ev.End.Format(time.RFC3339))
+			ev.Class, ev.End.Sub(ev.Start)+c.cfg.Interval, ev.End.Format(time.RFC3339))
 		c.openOutageID = 0
 	}
 }
